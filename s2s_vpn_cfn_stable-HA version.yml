@@ -1,0 +1,314 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Create the s2s vpn connection HA
+Resources:
+ #Create the VPC
+  AWSVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.1.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: s2s_vpn_aws_site
+
+  CustomerVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.2.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: s2s_vpn_customer_site
+ #Create the subnet
+  AWSsiteprivatesubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref AWSVPC
+      CidrBlock: 10.1.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: s2s_vpn_AWSsiteprivatesubnet
+
+  Customersitepublicsubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref CustomerVPC
+      CidrBlock: 10.2.2.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: s2s_vpn_Customersitepublicsubnet 
+
+  #Create the Internet Gateway and VPN Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  AttachInternetGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref CustomerVPC
+      InternetGatewayId: !Ref InternetGateway  
+
+  VPNGateway: 
+   Type: AWS::EC2::VPNGateway
+   Properties: 
+      Type: ipsec.1
+  AttachVPNGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref AWSVPC
+      VpnGatewayId: !Ref VPNGateway
+
+  # RouteTable
+  CustomersiteRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref CustomerVPC
+      Tags:
+        - Key: Name
+          Value: s2s_vpn_customer_site_main
+  AWSsiteRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref AWSVPC
+      Tags:
+        - Key: Name
+          Value: s2s_vpn_aws_site_main
+
+  # Add the route into RouteTable
+  CustomersiteInternetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachInternetGateway
+    Properties:
+      RouteTableId: !Ref CustomersiteRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  AWSsiteVPNRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachVPNGateway
+    Properties:
+      RouteTableId: !Ref AWSsiteRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref VPNGateway
+
+  AWSsiteprivatesubnetTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref AWSsiteRouteTable
+      SubnetId: !Ref AWSsiteprivatesubnet
+
+  CustomersitepublicsubnetTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref CustomersiteRouteTable
+      SubnetId: !Ref Customersitepublicsubnet
+
+  #Create the Security Group
+  CustomersiteSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: s2s_vpn_customer_site_sg
+      GroupDescription: "Allow Ping and SSH inbound traffic"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 10.1.0.0/16          
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref CustomerVPC
+
+  AWSsiteSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: s2s_vpn_aws_site_sg
+      GroupDescription: "Allow Ping and SSH inbound traffic"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 10.2.0.0/16
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 10.2.0.0/16    
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref AWSVPC
+
+  #Create the EC2
+  VPNserverInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0c02fb55956c7d316 
+      InstanceType: t2.micro
+      SubnetId: !Ref Customersitepublicsubnet
+      KeyName: zhangchi
+      SecurityGroupIds:
+        - !Ref CustomersiteSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+            #!/bin/bash
+            sudo su
+            yum install openswan -y
+            cat <<EOT >> /etc/sysctl.conf
+            net.ipv4.ip_forward = 1
+            net.ipv4.conf.default.rp_filter = 0
+            net.ipv4.conf.default.accept_source_route = 0
+            EOT
+            sysctl -p
+            systemctl restart network
+            touch /etc/ipsec.d/aws.conf
+            touch /etc/ipsec.d/aws.secrets
+            cat <<EOT >> /etc/ipsec.d/aws.conf
+            conn Tunnel1
+              authby=secret
+              auto=start
+              left=%defaultroute
+              leftid=VPNserverInstanceEIP
+              right=VPNConnection_Tunnel_1_IP
+              type=tunnel
+              ikelifetime=8h
+              keylife=1h
+              phase2alg=aes128-sha1;modp1024
+              ike=aes128-sha1;modp1024
+              keyingtries=%forever
+              keyexchange=ike
+              leftsubnet=10.2.0.0/16
+              rightsubnet=10.1.0.0/16
+              dpddelay=10
+              dpdtimeout=30
+              dpdaction=restart_by_peer
+            EOT
+            systemctl enable ipsec.service
+
+  VPNserverInstance2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0c02fb55956c7d316 
+      InstanceType: t2.micro
+      SubnetId: !Ref Customersitepublicsubnet
+      KeyName: zhangchi
+      SecurityGroupIds:
+        - !Ref CustomersiteSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+            #!/bin/bash
+            sudo su
+            yum install openswan -y
+            cat <<EOT >> /etc/sysctl.conf
+            net.ipv4.ip_forward = 1
+            net.ipv4.conf.default.rp_filter = 0
+            net.ipv4.conf.default.accept_source_route = 0
+            EOT
+            sysctl -p
+            systemctl restart network
+            touch /etc/ipsec.d/aws.conf
+            touch /etc/ipsec.d/aws.secrets
+            cat <<EOT >> /etc/ipsec.d/aws.conf
+            conn Tunnel1
+              authby=secret
+              auto=start
+              left=%defaultroute
+              leftid=VPNserverInstanceEIP
+              right=VPNConnection_Tunnel_1_IP
+              type=tunnel
+              ikelifetime=8h
+              keylife=1h
+              phase2alg=aes128-sha1;modp1024
+              ike=aes128-sha1;modp1024
+              keyingtries=%forever
+              keyexchange=ike
+              leftsubnet=10.2.0.0/16
+              rightsubnet=10.1.0.0/16
+              dpddelay=10
+              dpdtimeout=30
+              dpdaction=restart_by_peer
+            EOT
+            systemctl enable ipsec.service 
+
+  AWSPrivateInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0c02fb55956c7d316 
+      InstanceType: t2.micro
+      KeyName: zhangchi
+      SubnetId: !Ref AWSsiteprivatesubnet
+      SecurityGroupIds:
+        - !Ref AWSsiteSecurityGroup
+
+  VPNserverInstanceEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref VPNserverInstance
+  VPNserverInstanceEIP2:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref VPNserverInstance2
+
+  CustomerGateway: 
+    Type: AWS::EC2::CustomerGateway
+    Properties: 
+      Type: ipsec.1
+      BgpAsn: 65000
+      IpAddress: !Ref VPNserverInstanceEIP
+  CustomerGateway2: 
+    Type: AWS::EC2::CustomerGateway
+    Properties: 
+      Type: ipsec.1
+      BgpAsn: 65000
+      IpAddress: !Ref VPNserverInstanceEIP2
+
+  VPNConnection: 
+    Type: AWS::EC2::VPNConnection
+    Properties: 
+      Type: ipsec.1
+      StaticRoutesOnly: true
+      CustomerGatewayId: !Ref CustomerGateway
+      VpnGatewayId: !Ref VPNGateway
+  MyConnectionRoute0: 
+    Type: AWS::EC2::VPNConnectionRoute
+    Properties: 
+      DestinationCidrBlock: 10.2.0.0/16
+      VpnConnectionId: !Ref VPNConnection
+
+  VPNConnection2: 
+    Type: AWS::EC2::VPNConnection
+    Properties: 
+      Type: ipsec.1
+      StaticRoutesOnly: true
+      CustomerGatewayId: !Ref CustomerGateway2
+      VpnGatewayId: !Ref VPNGateway
+  MyConnectionRoute2: 
+    Type: AWS::EC2::VPNConnectionRoute
+    Properties: 
+      DestinationCidrBlock: 10.2.0.0/16
+      VpnConnectionId: !Ref VPNConnection2
+
+Outputs:
+  VPNserverInstancePublicIp:
+    Description: VPNserverInstance Public Ip
+    Value: !GetAtt VPNserverInstance.PublicIp
+  VPNserverInstancePublicIp2:
+    Description: VPNserverInstance2 Public Ip
+    Value: !GetAtt VPNserverInstance2.PublicIp
+  InstanceId:
+    Description: VPNserverInstance Instance Id
+    Value: !Ref VPNserverInstance
+  InstanceId2:
+    Description: VPNserverInstance Instance Id
+    Value: !Ref VPNserverInstance2
+  VPNserverVPC:
+    Description: VPN_server_Instance on VPC
+    Value: !GetAtt CustomerVPC.CidrBlock
