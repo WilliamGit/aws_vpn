@@ -154,7 +154,7 @@ Resources:
       ImageId: ami-0c02fb55956c7d316 
       InstanceType: t2.micro
       SubnetId: !Ref Customersitepublicsubnet
-      KeyName: zhangchi
+      KeyName: mykey
       SecurityGroupIds:
         - !Ref CustomersiteSecurityGroup
       UserData:
