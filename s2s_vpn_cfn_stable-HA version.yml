@@ -199,7 +199,7 @@ Resources:
       ImageId: ami-0c02fb55956c7d316 
       InstanceType: t2.micro
       SubnetId: !Ref Customersitepublicsubnet
-      KeyName: zhangchi
+      KeyName: mykey
       SecurityGroupIds:
         - !Ref CustomersiteSecurityGroup
       UserData:
@@ -243,7 +243,7 @@ Resources:
     Properties:
       ImageId: ami-0c02fb55956c7d316 
       InstanceType: t2.micro
-      KeyName: zhangchi
+      KeyName: mykey
       SubnetId: !Ref AWSsiteprivatesubnet
       SecurityGroupIds:
         - !Ref AWSsiteSecurityGroup
